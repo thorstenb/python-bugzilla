@@ -27,15 +27,15 @@ class BaseTest(unittest.TestCase):
     def clicomm(self, argstr, expectexc=False):
         comm = "bugzilla " + argstr
 
-        bz = self.bzclass(url=self.url, cookiefile=None)
+        bz = self.bzclass(url=self.url, cookiefile=None, tokenfile=None)
         if expectexc:
             self.assertRaises(Exception, tests.clicomm, comm, bz)
         else:
             return tests.clicomm(comm, bz)
 
     def _testBZClass(self):
-        bz = Bugzilla(url=self.url, cookiefile=None)
-        self.assertTrue(isinstance(bz, self.bzclass))
+        bz = Bugzilla(self.url, cookiefile=None, tokenfile=None)
+        self.assertTrue(bz.__class__ is self.bzclass)
 
     # Since we are running these tests against bugzilla instances in
     # the wild, we can't depend on certain data like product lists
@@ -114,22 +114,7 @@ class BaseTest(unittest.TestCase):
         self.assertTrue(expectstr in out)
 
 
-class BZ32(BaseTest):
-    url = "https://bugzilla.kernel.org/xmlrpc.cgi"
-    bzclass = bugzilla.Bugzilla32
-
-    test0 = BaseTest._testBZClass
-    test1 = lambda s: BaseTest._testInfoProducts(s, 10, "Virtualization")
-    test2 = lambda s: BaseTest._testInfoComps(s, "Virtualization", 3, "kvm")
-    test3 = lambda s: BaseTest._testInfoVers(s, "Virtualization", 0, None)
-    test4 = lambda s: BaseTest._testInfoCompOwners(s, "Virtualization", "FAIL")
-
-    # Querying was only supported as of bugzilla 3.4
-    test5 = lambda s: BaseTest._testQuery(s, "--product Virtualization",
-                                          0, "FAIL")
-
-
-class BZ34(BaseTest):
+class BZGnome(BaseTest):
     url = "https://bugzilla.gnome.org/xmlrpc.cgi"
     bzclass = bugzilla.Bugzilla34
     closestatus = "RESOLVED"
@@ -139,21 +124,21 @@ class BZ34(BaseTest):
                 "--product dogtail --component sniff",
                 9, "321654")
     # BZ < 4 doesn't report values for --full
-    test2 = lambda s: BaseTest._testQueryRaw(s, "321654", 50,
+    test2 = lambda s: BaseTest._testQueryRaw(s, "321654", 30,
                                              "ATTRIBUTE[version]: CVS HEAD")
     test3 = lambda s: BaseTest._testQueryOneline(s, "321654", "Sniff")
 
 
-class BZ42(BaseTest):
+class BZFDO(BaseTest):
     url = "https://bugs.freedesktop.org/xmlrpc.cgi"
-    bzclass = bugzilla.Bugzilla4
+    bzclass = bugzilla.Bugzilla44
     closestatus = "CLOSED,RESOLVED"
 
     test0 = BaseTest._testBZClass
 
     test1 = lambda s: BaseTest._testQuery(s, "--product avahi", 10, "3450")
     test2 = lambda s: BaseTest._testQueryFull(s, "3450", 10, "Blocked: \n")
-    test2 = lambda s: BaseTest._testQueryRaw(s, "3450", 50,
+    test2 = lambda s: BaseTest._testQueryRaw(s, "3450", 30,
                                     "ATTRIBUTE[creator]: daniel@fooishbar.org")
     test3 = lambda s: BaseTest._testQueryOneline(s, "3450",
                                     "daniel@fooishbar.org libavahi")
@@ -208,7 +193,7 @@ class RHTest(BaseTest):
     test13 = lambda s: BaseTest._testQueryFormat(s,
              "--bug_id 522796 --outputformat \"%{summary}\"",
              "V34 — system")
-    # CVE bug
+    # CVE bug output
     test14 = lambda s: BaseTest._testQueryOneline(s, "720784",
             " CVE-2011-2527")
 
@@ -216,3 +201,52 @@ class RHTest(BaseTest):
         out = self.clicomm("query --fixed_in anaconda-15.29-1")
         self.assertEquals(len(out.splitlines()), 6)
         self.assertTrue("#629311 CLOSED" in out)
+
+    def testComponentsDetails(self):
+        """
+        Fresh call to getcomponentsdetails should properly refresh
+        """
+        bz = self.bzclass(url=self.url, cookiefile=None, tokenfile=None)
+        self.assertTrue(
+            bool(bz.getcomponentsdetails("Red Hat Developer Toolset")))
+
+    def testGetBugAlias(self):
+        """
+        getbug() works if passed an alias
+        """
+        bz = self.bzclass(url=self.url, cookiefile=None, tokenfile=None)
+        bug = bz.getbug("CVE-2011-2527")
+        self.assertTrue(bug.bug_id == 720773)
+
+    def testQuerySubComponent(self):
+        # As of this writing, the feature is quite new and
+        # partner-bugzilla doesn't seem to have any actual bugs
+        # with sub components set. After a few months and a
+        # partner-bugzilla refresh we should be able to find something
+        # to check
+
+        out = self.clicomm("query --product 'Red Hat Enterprise Linux 7' "
+            "--component lvm2 --sub-component 'Thin Provisioning'")
+        self.assertTrue(len(out.splitlines()) >= 5)
+        self.assertTrue("#1060931 " in out)
+
+    def testBugFields(self):
+        bz = self.bzclass(url=self.url, cookiefile=None, tokenfile=None)
+        fields1 = bz.getbugfields()[:]
+        fields2 = bz.getbugfields(force_refresh=True)[:]
+        self.assertTrue(bool([f for f in fields1 if
+            f.startswith("attachments")]))
+        self.assertEqual(fields1, fields2)
+
+    def testBugAutoRefresh(self):
+        bz = self.bzclass(self.url, cookiefile=None, tokenfile=None)
+
+        bug = bz.query(bz.build_query(bug_id=720773,
+            include_fields=["summary"]))[0]
+        self.assertTrue(hasattr(bug, "component"))
+
+        bz.bug_autorefresh = False
+
+        bug = bz.query(bz.build_query(bug_id=720773,
+            include_fields=["summary"]))[0]
+        self.assertFalse(hasattr(bug, "component"))

@@ -10,8 +10,10 @@
 # the full text of the license.
 
 import locale
+from logging import getLogger
+import sys
 
-from bugzilla import log
+log = getLogger(__name__)
 
 
 class _Bug(object):
@@ -23,23 +25,22 @@ class _Bug(object):
                       you can read any attributes or make modifications to this
                       bug.
     '''
-    def __init__(self, bugzilla, **kwargs):
+    def __init__(self, bugzilla, bug_id=None, dict=None, autorefresh=True):
+        # pylint: disable=redefined-builtin
+        # API had pre-existing issue that we can't change ('dict' usage)
+
         self.bugzilla = bugzilla
+        self._bug_fields = []
+        self.autorefresh = autorefresh
 
-        if 'dict' in kwargs and kwargs['dict']:
-            log.debug("Bug(%s)" % sorted(kwargs['dict'].keys()))
-            self._update_dict(kwargs['dict'])
+        if bug_id:
+            if not dict:
+                dict = {}
+            dict["id"] = bug_id
 
-        if 'bug_id' in kwargs:
-            log.debug("Bug(%i)" % kwargs['bug_id'])
-            setattr(self, 'id', kwargs['bug_id'])
-
-        # Back compat for a previously handled param
-        if 'autorefresh' in kwargs:
-            del(kwargs["autorefresh"])
-
-        if not hasattr(self, 'id'):
-            raise TypeError("Bug object needs a bug_id")
+        if dict:
+            log.debug("Bug(%s)", sorted(dict.keys()))
+            self._update_dict(dict)
 
         self.weburl = bugzilla.url.replace('xmlrpc.cgi',
                                            'show_bug.cgi?id=%i' % self.bug_id)
@@ -48,10 +49,14 @@ class _Bug(object):
         '''Return a simple string representation of this bug
 
         This is available only for compatibility. Using 'str(bug)' and
-        'print bug' is not recommended because of potential encoding issues.
+        'print(bug)' is not recommended because of potential encoding issues.
         Please use unicode(bug) where possible.
         '''
-        return unicode(self).encode(locale.getpreferredencoding(), 'replace')
+        if hasattr(sys.version_info, "major") and sys.version_info.major >= 3:
+            return self.__unicode__()
+        else:
+            return self.__unicode__().encode(
+                locale.getpreferredencoding(), 'replace')
 
     def __unicode__(self):
         '''Return a simple unicode string representation of this bug'''
@@ -65,11 +70,16 @@ class _Bug(object):
     def __getattr__(self, name):
         refreshed = False
         while True:
-            if name in self.__dict__:
+            if refreshed and name in self.__dict__:
+                # If name was in __dict__ to begin with, __getattr__ would
+                # have never been called.
                 return self.__dict__[name]
 
-            # Check field aliases
-            for newname, oldname in self.bugzilla.field_aliases:
+            # pylint: disable=protected-access
+            aliases = self.bugzilla._get_bug_aliases()
+            # pylint: enable=protected-access
+
+            for newname, oldname in aliases:
                 if name == oldname and newname in self.__dict__:
                     return self.__dict__[newname]
 
@@ -78,76 +88,84 @@ class _Bug(object):
             if name.startswith("__") and name.endswith("__"):
                 break
 
-            if refreshed:
+            if refreshed or not self.autorefresh:
                 break
 
-            if 'id' not in self.__dict__:
-                # This is fatal, since we have no ID to pass to refresh()
-                # Can happen if a messed up include_fields is passed to query
-                raise AttributeError("No bug ID cached for bug object")
+            log.info("Bug %i missing attribute '%s' - doing implicit "
+                "refresh(). This will be slow, if you want to avoid "
+                "this, properly use query/getbug include_fields, and "
+                "set bugzilla.bug_autorefresh = False to force failure.",
+                self.bug_id, name)
 
-            log.debug("Bug %i missing attribute '%s' - doing refresh()",
-                      self.bug_id, name)
-            self.refresh()
+            # We pass the attribute name to getbug, since for something like
+            # 'attachments' which downloads lots of data we really want the
+            # user to opt in.
+            self.refresh(extra_fields=[name])
             refreshed = True
 
         raise AttributeError("Bug object has no attribute '%s'" % name)
 
-    def __hasattr__(self, name):
-        if name in self.__dict__:
-            return True
-
-        for newname, oldname in self.bugzilla.field_aliases:
-            if name == oldname and newname in self.__dict__:
-                return True
-        return False
-
-    def __getstate__(self):
-        sd = self.__dict__
-        if self.bugzilla:
-            fields = self.bugzilla.bugfields
-        else:
-            fields = self.bugfields
-        vals = [(k, sd[k]) for k in sd.keys() if k in fields]
-        vals.append(('bugfields', fields))
-        return dict(vals)
-
-    def __setstate__(self, d):
-        self._update_dict(d)
-        self.bugzilla = None
-
-    def refresh(self):
-        '''Refresh all the data in this Bug.'''
-        r = self.bugzilla._getbug(self.bug_id)
-
+    def refresh(self, include_fields=None, exclude_fields=None,
+        extra_fields=None):
+        '''
+        Refresh the bug with the latest data from bugzilla
+        '''
+        # pylint: disable=protected-access
+        r = self.bugzilla._getbug(self.bug_id,
+            include_fields=include_fields, exclude_fields=exclude_fields,
+            extra_fields=self._bug_fields + (extra_fields or []))
+        # pylint: enable=protected-access
         self._update_dict(r)
+    reload = refresh
 
     def _update_dict(self, newdict):
         '''
         Update internal dictionary, in a way that ensures no duplicate
         entries are stored WRT field aliases
         '''
-        self.bugzilla.post_translation({}, newdict)
+        if self.bugzilla:
+            self.bugzilla.post_translation({}, newdict)
 
-        for newname, oldname in self.bugzilla.field_aliases:
-            if not oldname in newdict:
-                continue
+            # pylint: disable=protected-access
+            aliases = self.bugzilla._get_bug_aliases()
+            # pylint: enable=protected-access
 
-            if newname not in newdict:
-                newdict[newname] = newdict[oldname]
-            elif newdict[newname] != newdict[oldname]:
-                log.debug("Update dict contained differing alias values "
-                          "d[%s]=%s and d[%s]=%s , dropping the value "
-                          "d[%s]", newname, newdict[newname], oldname,
-                          newdict[oldname], oldname)
-            del(newdict[oldname])
+            for newname, oldname in aliases:
+                if oldname not in newdict:
+                    continue
 
+                if newname not in newdict:
+                    newdict[newname] = newdict[oldname]
+                elif newdict[newname] != newdict[oldname]:
+                    log.debug("Update dict contained differing alias values "
+                              "d[%s]=%s and d[%s]=%s , dropping the value "
+                              "d[%s]", newname, newdict[newname], oldname,
+                            newdict[oldname], oldname)
+                del(newdict[oldname])
+
+        for key in newdict.keys():
+            if key not in self._bug_fields:
+                self._bug_fields.append(key)
         self.__dict__.update(newdict)
 
+        if 'id' not in self.__dict__ and 'bug_id' not in self.__dict__:
+            raise TypeError("Bug object needs a bug_id")
 
-    def reload(self):
-        '''An alias for refresh()'''
-        self.refresh()
+
+    ##################
+    # pickle helpers #
+    ##################
+
+    def __getstate__(self):
+        ret = {}
+        for key in self._bug_fields:
+            ret[key] = self.__dict__[key]
+        return ret
+
+    def __setstate__(self, vals):
+        self._bug_fields = []
+        self.bugzilla = None
+        self._update_dict(vals)
 
 
     #####################
@@ -407,6 +425,20 @@ class _Bug(object):
     # Experimental methods #
     ########################
 
+    def get_attachment_ids(self):
+        # pylint: disable=protected-access
+        proxy = self.bugzilla._proxy
+        # pylint: enable=protected-access
+
+        if "attachments" in self.__dict__:
+            attachments = self.attachments
+        else:
+            rawret = proxy.Bug.attachments(
+                {"ids": [self.bug_id], "exclude_fields": ["data"]})
+            attachments = rawret["bugs"][str(self.bug_id)]
+
+        return [a["id"] for a in attachments]
+
     def get_history(self):
         '''
         Experimental. Get the history of changes for this bug.
@@ -458,7 +490,9 @@ class _User(object):
         self.groupnames.sort()
 
 
-    ### Read-only attributes ###
+    ########################
+    # Read-only attributes #
+    ########################
 
     # We make these properties so that the user cannot set them.  They are
     # unaffected by the update() method so it would be misleading to let them
@@ -475,7 +509,7 @@ class _User(object):
     def can_login(self):
         return self.__can_login
 
-    ### name is a key in some methods.  Mark it dirty when we change it ###
+    # name is a key in some methods.  Mark it dirty when we change it #
     @property
     def name(self):
         return self.__name

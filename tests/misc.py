@@ -9,7 +9,10 @@
 Unit tests for building query strings with bin/bugzilla
 '''
 
+from __future__ import print_function
+
 import atexit
+import logging
 import os
 import shutil
 import sys
@@ -34,8 +37,9 @@ class MiscCLI(unittest.TestCase):
 
             from logilab.common.optik_ext import ManHelpFormatter
             ignore = ManHelpFormatter
-        except Exception, e:
-            print "Skipping man page test: %s" % e
+        except Exception:
+            e = sys.exc_info()[1]
+            print("Skipping man page test: %s" % e)
             return
 
         out = tests.clicomm("bugzilla --generate-man", None)
@@ -59,18 +63,13 @@ class MiscAPI(unittest.TestCase):
     Test miscellaneous API bits
     """
     def testUserAgent(self):
-        b3 = bugzilla.Bugzilla3(url=None, cookiefile=None)
-        rhbz = bugzilla.RHBugzilla(url=None, cookiefile=None)
+        b3 = bugzilla.Bugzilla3(url=None, cookiefile=None, tokenfile=None)
+        rhbz = bugzilla.RHBugzilla(url=None, cookiefile=None, tokenfile=None)
 
-        self.assertTrue(b3.user_agent.endswith("Bugzilla3/0.1"))
-        self.assertTrue(rhbz.user_agent.endswith("RHBugzilla/0.1"))
+        self.assertTrue(b3.user_agent.endswith("Bugzilla3"))
+        self.assertTrue(rhbz.user_agent.endswith("RHBugzilla"))
 
     def testCookies(self):
-        if (sys.version_info[0] < 2 or
-            (sys.version_info[0] == 2 and sys.version_info[1] < 6)):
-            print "\npython too old, skipping cookie test"
-            return
-
         cookiesbad = os.path.join(os.getcwd(), "tests/data/cookies-bad.txt")
         cookieslwp = os.path.join(os.getcwd(), "tests/data/cookies-lwp.txt")
         cookiesmoz = os.path.join(os.getcwd(), "tests/data/cookies-moz.txt")
@@ -84,7 +83,12 @@ class MiscAPI(unittest.TestCase):
 
         # Mozilla should be converted inplace to LWP
         bugzilla.Bugzilla3(url=None, cookiefile=cookiesnew)
-        self.assertEquals(file(cookiesmoz).read(), file(cookiesnew).read())
+
+        def strip_comments(content):
+            return [l for l in content.split("\n") if not l.startswith("#")]
+        self.assertEquals(
+            strip_comments(open(cookiesmoz).read()),
+            strip_comments(open(cookiesnew).read()))
 
         # Make sure bad cookies raise an error
         try:
@@ -108,8 +112,8 @@ class MiscAPI(unittest.TestCase):
             bz.post_translation({}, outdict)
             self.assertTrue(outdict == outexpect)
 
-        bug3 = bugzilla.Bugzilla3(url=None, cookiefile=None)
-        rhbz = bugzilla.RHBugzilla(url=None, cookiefile=None)
+        bug3 = bugzilla.Bugzilla3(url=None, cookiefile=None, tokenfile=None)
+        rhbz = bugzilla.RHBugzilla(url=None, cookiefile=None, tokenfile=None)
 
         test1 = {
             "component": ["comp1"],
@@ -153,3 +157,16 @@ class MiscAPI(unittest.TestCase):
 
         rhbz.rhbz_back_compat = True
         _testPostCompare(rhbz, test1, out_complex)
+
+    def testRHBZInit(self):
+        # Just get us coverage when the extra values are specified
+        level = bugzilla.log.level
+        bugzilla.log.setLevel(logging.ERROR)
+        bugzilla.RHBugzilla(None, cookiefile=None, multicall=True,
+            rhbz_back_compat=True)
+        bugzilla.log.setLevel(level)
+
+    def testUnimplementedAPI(self):
+        bz3 = bugzilla.Bugzilla3(None, cookiefile=None, tokenfile=None)
+        self.assertRaises(RuntimeError, bz3.getbugfields)
+        self.assertRaises(RuntimeError, bz3.getqueryinfo)

@@ -16,7 +16,7 @@ from bugzilla.bugzilla4 import Bugzilla4
 import tests
 
 
-bz4 = Bugzilla4(cookiefile=None)
+bz4 = Bugzilla4(cookiefile=None, tokenfile=None)
 
 
 class CreatebugTest(unittest.TestCase):
@@ -59,16 +59,34 @@ class CreatebugTest(unittest.TestCase):
              'severity': 'HIGH'}
         )
 
+    def testMisc(self):
+        self.clicomm(
+            "--alias some-alias",
+            {"alias": "some-alias"}
+        )
+
     def testMultiOpts(self):
         # Test all opts that can take lists
         out = {'blocks': ['3', '4'], 'cc': ['1', '2'],
-               'depends_on': ['5', 'foo', 'wib'], 'groups': ['bar', '8']}
+               'depends_on': ['5', 'foo', 'wib'], 'groups': ['bar', '8'],
+               'keywords': ['TestOnly', 'ZStream']}
         self.clicomm(
-            "--cc 1,2 --blocked 3,4 --dependson 5,foo,wib --groups bar,8",
+            "--cc 1,2 --blocked 3,4 --dependson 5,foo,wib --groups bar,8 "
+            "--keywords TestOnly,ZStream",
             out
         )
         self.clicomm(
             "--cc 1 --cc 2 --blocked 3 --blocked 4 "
-            "--dependson 5,foo --dependson wib --groups bar --groups 8",
+            "--dependson 5,foo --dependson wib --groups bar --groups 8 "
+            "--keywords TestOnly --keywords ZStream",
             out
         )
+
+    def testFieldConversion(self):
+        vc = self.bz._validate_createbug  # pylint: disable=protected-access
+        out = vc(product="foo", component="bar",
+            version="12", description="foo", short_desc="bar",
+            check_args=False)
+        self.assertDictEqual(out,
+            {'component': 'bar', 'description': 'foo', 'product': 'foo',
+             'summary': 'bar', 'version': '12'})

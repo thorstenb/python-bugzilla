@@ -16,7 +16,7 @@ from bugzilla.rhbugzilla import RHBugzilla
 import tests
 
 
-rhbz = RHBugzilla(cookiefile=None)
+rhbz = RHBugzilla(cookiefile=None, tokenfile=None)
 
 
 class ModifyTest(unittest.TestCase):
@@ -29,20 +29,27 @@ class ModifyTest(unittest.TestCase):
             return unittest.TestCase.assertDictEqual(self, *args, **kwargs)
         return self.assertEqual(*args, **kwargs)
 
-    def clicomm(self, argstr, out, flagsout=None, wbout=None):
+    def clicomm(self, argstr, out, flagsout=None, wbout=None,
+                tags_add=None, tags_rm=None):
         comm = "bugzilla modify --test-return-result 123456 224466 " + argstr
+        # pylint: disable=unpacking-non-sequence
 
         if out is None:
             self.assertRaises(RuntimeError, tests.clicomm, comm, self.bz)
         else:
-            (mdict, fdict, wdict) = tests.clicomm(comm,
-                                                  self.bz, returnmain=True)
+            (mdict, fdict, wdict, tagsa, tagsr) = tests.clicomm(
+                comm, self.bz, returnmain=True)
+
             if wbout:
                 self.assertDictEqual(wbout, wdict)
             if flagsout:
                 self.assertEqual(flagsout, fdict)
             if out:
                 self.assertDictEqual(out, mdict)
+            if tags_add:
+                self.assertEqual(tags_add, tagsa)
+            if tags_rm:
+                self.assertEqual(tags_rm, tagsr)
 
     def testBasic(self):
         self.clicomm(
@@ -95,13 +102,15 @@ class ModifyTest(unittest.TestCase):
         self.clicomm(
             "--qa_whiteboard =yo-qa --qa_whiteboard -foo "
             "--internal_whiteboard =internal-hey --internal_whiteboard +bar "
-            "--devel_whiteboard =devel-duh --devel_whiteboard -yay",
+            "--devel_whiteboard =devel-duh --devel_whiteboard -yay "
+            "--tags foo1 --tags -remove2",
             {'cf_devel_whiteboard': 'devel-duh',
              'cf_internal_whiteboard': 'internal-hey',
              'cf_qa_whiteboard': 'yo-qa'}, wbout={
-            "qa": ([], ["foo"]),
-            "internal": (["bar"], []),
-            "devel": ([], ["yay"])},
+                "qa": ([], ["foo"]),
+                "internal": (["bar"], []),
+                "devel": ([], ["yay"])
+            }, tags_add=["foo1"], tags_rm=["remove2"],
         )
 
     def testMisc(self):
@@ -129,6 +138,24 @@ class ModifyTest(unittest.TestCase):
             {"op_sys": "Windows", "platform": "ia64", "version": "1000",
              "url": "http://example.com", "summary": 'foo summary'},
         )
+        self.clicomm(
+            "--alias some-alias",
+            {"alias": "some-alias"}
+        )
+
+
+    def testField(self):
+        self.clicomm(
+            "--field cf_fixed_in=foo-bar-1.2.4",
+            {"cf_fixed_in": "foo-bar-1.2.4"}
+        )
+
+        self.clicomm(
+            "--field cf_fixed_in=foo-bar-1.2.5 --field=cf_release_notes=blah",
+            {"cf_fixed_in": "foo-bar-1.2.5",
+             "cf_release_notes": "blah"}
+        )
+
 
     def testDepends(self):
         self.clicomm(
@@ -172,3 +199,11 @@ class ModifyTest(unittest.TestCase):
                             "+foo@example.com"],
                     'remove': ["minus@example.com"]}},
         )
+
+    def testSubComponents(self):
+        self.clicomm("--component foo --sub-component 'bar baz'",
+            {"component": "foo", "sub_components": {"foo": "bar baz"}})
+
+    def testSubComponentFail(self):
+        self.assertRaises(ValueError, self.bz.build_update,
+            sub_component="some sub component")

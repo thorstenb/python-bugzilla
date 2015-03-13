@@ -9,18 +9,20 @@
 Unit tests for building query strings with bin/bugzilla
 '''
 
+import copy
 import os
 import unittest
 
+import bugzilla
 from bugzilla.bugzilla3 import Bugzilla34
 from bugzilla.bugzilla4 import Bugzilla4
 from bugzilla.rhbugzilla import RHBugzilla4
 
 import tests
 
-bz34 = Bugzilla34(cookiefile=None)
-bz4 = Bugzilla4(cookiefile=None)
-rhbz4 = RHBugzilla4(cookiefile=None)
+bz34 = Bugzilla34(cookiefile=None, tokenfile=None)
+bz4 = Bugzilla4(cookiefile=None, tokenfile=None)
+rhbz4 = RHBugzilla4(cookiefile=None, tokenfile=None)
 
 
 class BZ34Test(unittest.TestCase):
@@ -106,6 +108,20 @@ class BZ34Test(unittest.TestCase):
                     "--boolean_query '! foo-bar-yargh'",
                     self._booleans_chart_out)
 
+    def testLongDesc(self):
+        self.clicomm("--long_desc 'foobar'", self._longdesc_out)
+
+    def testQuicksearch(self):
+        self.clicomm("--quicksearch 'foo bar baz'", self._quicksearch_out)
+
+    def testSavedsearch(self):
+        self.clicomm("--savedsearch 'my saved search' "
+            "--savedsearch-sharer-id 123456", self._savedsearch_out)
+
+    def testSubComponent(self):
+        self.clicomm("--component lvm2,kernel "
+            "--sub-component 'Command-line tools (RHEL5)'",
+            self._sub_component_out)
 
     # Test data. This is what subclasses need to fill in
     bz = bz34
@@ -133,6 +149,10 @@ class BZ34Test(unittest.TestCase):
         'http://example.com', 'bug_file_loc_type': 'foo'}
     _booleans_out = None
     _booleans_chart_out = None
+    _longdesc_out = None
+    _quicksearch_out = None
+    _savedsearch_out = None
+    _sub_component_out = None
 
 
 class BZ4Test(BZ34Test):
@@ -213,3 +233,84 @@ class RHBZTest(BZ4Test):
         'type0-1-0': 'notsubstring', 'value0-1-0': 'OtherQA',
         'include_fields': BZ4Test._default_includes,
         'query_format': 'advanced'}
+    _longdesc_out = {'include_fields': BZ4Test._default_includes,
+        'longdesc': 'foobar', 'longdesc_type': 'allwordssubstr',
+        'query_format': 'advanced'}
+    _quicksearch_out = {'include_fields': BZ4Test._default_includes,
+        'quicksearch': 'foo bar baz'}
+    _savedsearch_out = {'include_fields': BZ4Test._default_includes,
+        'savedsearch': "my saved search", 'sharer_id': "123456"}
+    _sub_component_out = {'include_fields': BZ4Test._default_includes,
+        'component': ["lvm2", "kernel"],
+        'sub_components': ["Command-line tools (RHEL5)"]}
+
+    def testTranslation(self):
+        def translate(_in):
+            _out = copy.deepcopy(_in)
+            self.bz.pre_translation(_out)
+            return _out
+
+        in_query = {
+            "fixed_in": "foo.bar",
+            "product": "some-product",
+            "cf_devel_whiteboard": "some_devel_whiteboard",
+            "include_fields": ["fixed_in",
+                "components", "cf_devel_whiteboard"],
+        }
+        out_query = translate(in_query)
+
+        in_query["include_fields"] = [
+            "cf_devel_whiteboard", "cf_fixed_in", "component"]
+        self.assertDictEqual(in_query, out_query)
+
+        in_query = {"bug_id": "123,456", "component": "foo,bar"}
+        out_query = translate(in_query)
+        self.assertEqual(out_query["id"], ["123", "456"])
+        self.assertEqual(out_query["component"], ["foo", "bar"])
+
+        in_query = {"bug_id": [123, 124], "column_list": ["id"]}
+        out_query = translate(in_query)
+        self.assertEqual(out_query["id"], [123, 124])
+        self.assertEqual(out_query["include_fields"], in_query["column_list"])
+
+    def testInvalidBoolean(self):
+        self.assertRaises(RuntimeError, self.bz.build_query,
+            boolean_query="foobar")
+
+
+class TestURLToQuery(BZ34Test):
+    def _check(self, url, query):
+        self.assertDictEqual(bz4.url_to_query(url), query)
+
+    def testSavedSearch(self):
+        url = ("https://bugzilla.redhat.com/buglist.cgi?"
+            "cmdtype=dorem&list_id=2342312&namedcmd="
+            "RHEL7%20new%20assigned%20virt-maint&remaction=run&"
+            "sharer_id=321167")
+        query = {
+            'sharer_id': '321167',
+            'savedsearch': 'RHEL7 new assigned virt-maint'
+        }
+        self._check(url, query)
+
+    def testStandardQuery(self):
+        url = ("https://bugzilla.redhat.com/buglist.cgi?"
+            "component=virt-manager&query_format=advanced&classification="
+            "Fedora&product=Fedora&bug_status=NEW&bug_status=ASSIGNED&"
+            "bug_status=MODIFIED&bug_status=ON_DEV&bug_status=ON_QA&"
+            "bug_status=VERIFIED&bug_status=FAILS_QA&bug_status="
+            "RELEASE_PENDING&bug_status=POST&order=bug_status%2Cbug_id")
+        query = {
+            'product': 'Fedora',
+            'query_format': 'advanced',
+            'bug_status': ['NEW', 'ASSIGNED', 'MODIFIED', 'ON_DEV',
+                'ON_QA', 'VERIFIED', 'FAILS_QA', 'RELEASE_PENDING', 'POST'],
+            'classification': 'Fedora',
+            'component': 'virt-manager',
+            'order': 'bug_status,bug_id'
+        }
+        self._check(url, query)
+
+    def testBZAutoMagic(self):
+        bz = bugzilla.Bugzilla("bugzilla.redhat.com")
+        self.assertTrue(hasattr(bz, "rhbz_back_compat"))

@@ -9,9 +9,11 @@
 # option) any later version.  See http://www.gnu.org/copyleft/gpl.html for
 # the full text of the license.
 
+from logging import getLogger
 
-from bugzilla import log
-from bugzilla.bugzilla4 import Bugzilla44 as _parent
+from .bugzilla4 import Bugzilla44 as _parent
+
+log = getLogger(__name__)
 
 
 class RHBugzilla(_parent):
@@ -30,71 +32,153 @@ class RHBugzilla(_parent):
     https://bugzilla.redhat.com/docs/en/html/api/
     '''
 
-    version = '0.1'
-
-    def __init__(self, **kwargs):
+    def __init__(self, *args, **kwargs):
         """
-        @multicall: No longer used
         @rhbz_back_compat: If True, convert parameters to the format they were
-                           in prior RHBZ upgrade in June 2012. Mostly this
-                           replaces lists with comma separated strings,
-                           and alters groups and flags. Default is False
+            in prior RHBZ upgrade in June 2012. Mostly this replaces lists
+            with comma separated strings, and alters groups and flags.
+            Default is False. Please don't use this in new code, just update
+            your scripts.
+        @multicall: Unused nowadays, will be removed in the future
         """
-        # 'multicall' is no longer used, keep it here for back compat
-        self.multicall = True
-        self.rhbz_back_compat = False
+        # 'multicall' is no longer used, just ignore it
+        multicall = kwargs.pop("multicall", None)
+        self.rhbz_back_compat = bool(kwargs.pop("rhbz_back_compat", False))
 
-        if "multicall" in kwargs:
-            self.multicall = kwargs.pop("multicall")
-        if "rhbz_back_compat" in kwargs:
-            self.rhbz_back_compat = bool(kwargs.pop("rhbz_back_compat"))
+        if multicall is not None:
+            log.warn("multicall is unused and will be removed in a "
+                "future release.")
 
-        _parent.__init__(self, **kwargs)
+        if self.rhbz_back_compat:
+            log.warn("rhbz_back_compat will be removed in a future release.")
 
-    getbug_extra_fields = (
-        _parent.getbug_extra_fields + [
-            "attachments", "comments", "description",
-            "external_bugs", "flags",
+        _parent.__init__(self, *args, **kwargs)
+
+        def _add_both_alias(newname, origname):
+            self._add_field_alias(newname, origname, is_api=False)
+            self._add_field_alias(origname, newname, is_bug=False)
+
+        _add_both_alias('fixed_in', 'cf_fixed_in')
+        _add_both_alias('qa_whiteboard', 'cf_qa_whiteboard')
+        _add_both_alias('devel_whiteboard', 'cf_devel_whiteboard')
+        _add_both_alias('internal_whiteboard', 'cf_internal_whiteboard')
+
+        self._add_field_alias('component', 'components', is_bug=False)
+        self._add_field_alias('version', 'versions', is_bug=False)
+        self._add_field_alias('sub_component', 'sub_components', is_bug=False)
+
+        # flags format isn't exactly the same but it's the closest approx
+        self._add_field_alias('flags', 'flag_types')
+
+        self._getbug_extra_fields = self._getbug_extra_fields + [
+            "comments", "description",
+            "external_bugs", "flags", "sub_components",
+            "tags",
         ]
-    )
-
-    field_aliases = (
-        _parent.field_aliases + (
-            ('fixed_in', 'cf_fixed_in'),
-            ('qa_whiteboard', 'cf_qa_whiteboard'),
-            ('devel_whiteboard', 'cf_devel_whiteboard'),
-            ('internal_whiteboard', 'cf_internal_whiteboard'),
-            # Format isn't exactly the same but it's the closest approximation
-            ('flags', 'flag_types'),
-        )
-    )
+        self._supports_getbug_extra_fields = True
 
 
     ######################
     # Bug update methods #
     ######################
 
-    def build_update(self, *args, **kwargs):
+    def build_update(self, **kwargs):
         adddict = {}
 
         def pop(key, destkey):
-            if key not in kwargs:
-                return
-
-            val = kwargs.pop(key)
+            val = kwargs.pop(key, None)
             if val is None:
                 return
             adddict[destkey] = val
+
+        def get_sub_component():
+            val = kwargs.pop("sub_component", None)
+            if val is None:
+                return
+
+            if type(val) is not dict:
+                component = self._listify(kwargs.get("component"))
+                if not component:
+                    raise ValueError("component must be specified if "
+                        "specifying sub_component")
+                val = {component[0]: val}
+            adddict["sub_components"] = val
+
+        def get_alias():
+            # RHBZ has a custom extension to allow a bug to have multiple
+            # aliases, so the format of aliases is
+            #    {"add": [...], "remove": [...]}
+            # But that means in order to approximate upstream, behavior
+            # which just overwrites the existing alias, we need to read
+            # the bug's state first to know what string to remove. Which
+            # we can't do, since we don't know the bug numbers at this point.
+            # So fail for now.
+            #
+            # The API should provide {"set": [...]}
+            # https://bugzilla.redhat.com/show_bug.cgi?id=1173114
+            #
+            # Implementation will go here when it's available
+            pass
 
         pop("fixed_in", "cf_fixed_in")
         pop("qa_whiteboard", "cf_qa_whiteboard")
         pop("devel_whiteboard", "cf_devel_whiteboard")
         pop("internal_whiteboard", "cf_internal_whiteboard")
 
-        vals = _parent.build_update(self, *args, **kwargs)
+        get_sub_component()
+        get_alias()
+
+        vals = _parent.build_update(self, **kwargs)
         vals.update(adddict)
 
         return vals
+
+    def add_external_tracker(self, bug_ids, type_desc, external_id):
+        """
+        Wrapper method to allow adding of external tracking bugs using the
+        ExternalBugs::WebService::add_external_bug method.
+
+        This is documented at
+        https://bugzilla.redhat.com/docs/en/html/api/extensions/ExternalBugs/lib/WebService.html#add_external_bug
+
+        bug_ids: A single bug id or list if bug ids to add the tracker to.
+        type_desc: The external tracker description as used by Bugzilla. This
+            value maps to the ext_type_description parameter of the XMLRPC
+            method.
+        external_id: The id as used by the external tracker. This value maps to
+            the ext_bz_bug_id parameter of the XMLRPC method.
+        """
+        kwargs = {
+            'bug_ids': self._listify(bug_ids),
+            'external_bugs': [{
+                'ext_type_description': type_desc,
+                'ext_bz_bug_id': external_id,
+            }],
+        }
+        return self._proxy.ExternalBugs.add_external_bug(kwargs)
+
+    def remove_external_tracker(self, bug_ids, type_desc, external_ids):
+        """
+        Wrapper method to allow removal of external tracking bugs using the
+        ExternalBugs::WebService::remove_external_bug method.
+
+        This is documented at
+        https://bugzilla.redhat.com/docs/en/html/api/extensions/ExternalBugs/lib/WebService.html#remove_external_bug
+
+        bug_ids: A single bug id or list if bug ids to remove the tracker from.
+        type_desc: The external tracker description as used by Bugzilla. This
+            value maps to the ext_type_description parameter of the XMLRPC
+            method.
+        external_ids: The id or list of ids as used by the external tracker.
+            This value maps to the ext_bz_bug_id parameter of the XMLRPC
+            method.
+        """
+        kwargs = {
+            'bug_ids': self._listify(bug_ids),
+            'ext_type_description': type_desc,
+            'ext_bz_bug_id': self._listify(external_ids),
+        }
+        return self._proxy.ExternalBugs.remove_external_bug(kwargs)
 
 
     #################
@@ -125,12 +209,9 @@ class RHBugzilla(_parent):
                 query['include_fields'] = query['column_list']
                 del query['column_list']
 
-        include_fields = query['include_fields']
-        for newname, oldname in self.field_aliases:
-            if oldname in include_fields:
-                include_fields.remove(oldname)
-                if newname not in include_fields:
-                    include_fields.append(newname)
+        # We need to do this for users here for users that
+        # don't call build_query
+        self._convert_include_field_list(query['include_fields'])
 
         if old != query:
             log.debug("RHBugzilla pretranslated query to: %s", query)
@@ -145,15 +226,26 @@ class RHBugzilla(_parent):
         # RHBZ _still_ returns component and version as lists, which
         # deviates from upstream. Copy the list values to components
         # and versions respectively.
-        if 'component' in bug and not "components" in bug:
+        if 'component' in bug and "components" not in bug:
             val = bug['component']
             bug['components'] = type(val) is list and val or [val]
             bug['component'] = bug['components'][0]
 
-        if 'version' in bug and not "versions" in bug:
+        if 'version' in bug and "versions" not in bug:
             val = bug['version']
             bug['versions'] = type(val) is list and val or [val]
             bug['version'] = bug['versions'][0]
+
+        # sub_components isn't too friendly of a format, add a simpler
+        # sub_component value
+        if 'sub_components' in bug and 'sub_component' not in bug:
+            val = bug['sub_components']
+            bug['sub_component'] = ""
+            if type(val) is dict:
+                values = []
+                for vallist in val.values():
+                    values += vallist
+                bug['sub_component'] = " ".join(values)
 
         if not self.rhbz_back_compat:
             return
@@ -192,15 +284,54 @@ class RHBugzilla(_parent):
                 tmp.append(t)
             bug['groups'] = tmp
 
+    def build_external_tracker_boolean_query(
+            self, type_desc=None, external_id=None):
+        """
+        Helper method to build a boolean query to find bugs that contain an
+        external tracker with the 'type_desc' and 'external_id' combination.
+
+        All parameters that are None will be ignored when building the query.
+
+        type_desc: The external tracker description as used by Bugzilla. This
+            value maps to the external_bugzilla.description field.
+        external_ids: The id as used by the external tracker. This value maps
+            to the ext_bz_bug_map.ext_bz_bug_id field.
+        """
+        parts = []
+
+        if type_desc is not None:
+            parts.append(
+                'external_bugzilla.description-equals-{0:s}'.format(type_desc))
+
+        if external_id is not None:
+            id_str = str(external_id)
+            parts.append(
+                'ext_bz_bug_map.ext_bz_bug_id-equals-{0:s}'.format(id_str))
+
+        return ' & '.join(parts)
+
     def build_query(self, **kwargs):
         query = {}
 
-        def add_email(key, count):
-            if not key in kwargs:
-                return count
+        def _add_key(paramname, keyname, listify=False):
+            val = kwargs.pop(paramname, None)
+            if val is None:
+                return
+            if listify:
+                val = self._listify(val)
+            query[keyname] = val
 
-            value = kwargs.get(key)
-            del(kwargs[key])
+        def add_longdesc():
+            val = kwargs.pop("long_desc", None)
+            if val is None:
+                return
+
+            query["query_format"] = "advanced"
+            query["longdesc"] = val
+            query["longdesc_type"] = "allwordssubstr"
+
+        def add_email(key, count):
+            value = kwargs.pop(key, None)
             if value is None:
                 return count
 
@@ -235,10 +366,7 @@ class RHBugzilla(_parent):
             return retlist
 
         def add_boolean(kwkey, key, bool_id):
-            if not kwkey in kwargs:
-                return bool_id
-
-            value = self._listify(kwargs.pop(kwkey))
+            value = self._listify(kwargs.pop(kwkey, None))
             if value is None:
                 return bool_id
 
@@ -248,6 +376,7 @@ class RHBugzilla(_parent):
                 or_count = 0
 
                 def make_bool_str(prefix):
+                    # pylint: disable=cell-var-from-loop
                     return "%s%i-%i-%i" % (prefix, bool_id,
                                            and_count, or_count)
 
@@ -304,6 +433,18 @@ class RHBugzilla(_parent):
                                chart_id)
         chart_id = add_boolean("alias", "alias", chart_id)
         chart_id = add_boolean("boolean_query", None, chart_id)
+
+        add_longdesc()
+
+        _add_key("quicksearch", "quicksearch")
+        _add_key("savedsearch", "savedsearch")
+        _add_key("savedsearch_sharer_id", "sharer_id")
+        _add_key("sub_component", "sub_components", listify=True)
+
+        extra_fields = self._convert_include_field_list(
+            kwargs.pop('extra_fields', None))
+        if extra_fields:
+            query["extra_fields"] = extra_fields
 
         newquery = _parent.build_query(self, **kwargs)
         query.update(newquery)

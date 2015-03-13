@@ -9,19 +9,28 @@
 Unit tests that do permanent functional against a real bugzilla instances.
 '''
 
+from __future__ import print_function
+
 import datetime
 import os
 import random
 import sys
 import unittest
-import urllib2
+
+if hasattr(sys.version_info, "major") and sys.version_info.major >= 3:
+    # pylint: disable=F0401,E0611
+    from urllib.parse import urlparse
+else:
+    from urlparse import urlparse
 
 import bugzilla
 from bugzilla import Bugzilla
+from bugzilla.base import _BugzillaToken
 
 import tests
 
 cf = os.path.expanduser("~/.bugzillacookies")
+tf = os.path.expanduser("~/.bugzillatoken")
 
 
 def _split_int(s):
@@ -33,19 +42,23 @@ class BaseTest(unittest.TestCase):
     bzclass = None
 
     def _testBZClass(self):
-        bz = Bugzilla(url=self.url, cookiefile=None)
-        self.assertTrue(isinstance(bz, self.bzclass))
+        bz = Bugzilla(url=self.url, cookiefile=None, tokenfile=None)
+        self.assertTrue(bz.__class__ is self.bzclass)
 
-    def _testCookie(self):
-        cookiefile = cf
-        domain = urllib2.urlparse.urlparse(self.url)[1]
-        if os.path.exists(cookiefile):
-            out = file(cookiefile).read(1024)
+    def _testCookieOrToken(self):
+        domain = urlparse(self.url)[1]
+        if os.path.exists(cf):
+            out = open(cf).read(1024)
             if domain in out:
                 return
 
-        raise RuntimeError("%s must exist and contain domain '%s'" %
-                           (cookiefile, domain))
+        if os.path.exists(tf):
+            token = _BugzillaToken(self.url, tokenfilename=tf)
+            if token.value is not None:
+                return
+
+        raise RuntimeError("%s or %s must exist and contain domain '%s'" %
+                           (cf, tf, domain))
 
 
 class RHPartnerTest(BaseTest):
@@ -53,7 +66,7 @@ class RHPartnerTest(BaseTest):
     # doesn't send out emails and is blown away occasionally. The front
     # page has some info.
     url = "https://partner-bugzilla.redhat.com/xmlrpc.cgi"
-    #url = "https://bzweb01-devel.app.eng.rdu.redhat.com/"
+    # url = "https://bzweb01-devel.app.eng.rdu.redhat.com/"
     bzclass = bugzilla.RHBugzilla
 
 
@@ -63,17 +76,17 @@ class RHPartnerTest(BaseTest):
         # Check a known account that likely won't ever go away
         ret = bool(bz.getuser("anaconda-maint-list@redhat.com").groupnames)
         if not ret:
-            print "\nNo admin privs, skipping %s" % funcname
+            print("\nNo admin privs, skipping %s" % funcname)
         return ret
 
-    def _check_rh_privs(self, bz, funcname, quiet=False):
+    def _check_rh_privs(self, bz, funcname, authtype, quiet=False):
         noprivs = bool(bz.getbugs([184858]) == [None])
         if noprivs and not quiet:
-            print "\nNo RH privs, skipping %s" % funcname
+            print("\nNo RH %s privs, skipping %s" % (authtype, funcname))
         return not noprivs
 
 
-    test1 = BaseTest._testCookie
+    test1 = BaseTest._testCookieOrToken
     test2 = BaseTest._testBZClass
 
 
@@ -81,7 +94,7 @@ class RHPartnerTest(BaseTest):
         """
         Create a bug with minimal amount of fields, then close it
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         component = "python-bugzilla"
         version = "rawhide"
         summary = ("python-bugzilla test basic bug %s" %
@@ -97,7 +110,7 @@ class RHPartnerTest(BaseTest):
 
         bugid = int(newout.splitlines()[2])
         bug = bz.getbug(bugid)
-        print "\nCreated bugid: %s" % bugid
+        print("\nCreated bugid: %s" % bugid)
 
         # Verify hasattr works
         self.assertTrue(hasattr(bug, "id"))
@@ -119,7 +132,7 @@ class RHPartnerTest(BaseTest):
         """
         Create a bug using all 'new' fields, check some values, close it
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
 
         summary = ("python-bugzilla test manyfields bug %s" %
                    datetime.datetime.today())
@@ -129,20 +142,25 @@ class RHPartnerTest(BaseTest):
         blocked = "461686,461687"
         dependson = "427301"
         comment = "Test bug from python-bugzilla test suite"
+        sub_component = "Command-line tools (RHEL6)"
+        alias = "pybz-%s" % datetime.datetime.today().strftime("%s")
         newout = tests.clicomm("bugzilla new "
-            "--product Fedora --component python-bugzilla --version rawhide "
+            "--product 'Red Hat Enterprise Linux 6' --version 6.0 "
+            "--component lvm2 --sub-component '%s' "
             "--summary \"%s\" "
             "--comment \"%s\" "
             "--url %s --severity Urgent --priority Low --os %s "
             "--arch ppc --cc %s --blocked %s --dependson %s "
+            "--alias %s "
             "--outputformat \"%%{bug_id}\"" %
-            (summary, comment, url, osval, cc, blocked, dependson), bz)
+            (sub_component, summary, comment, url,
+             osval, cc, blocked, dependson, alias), bz)
 
         self.assertTrue(len(newout.splitlines()) == 3)
 
         bugid = int(newout.splitlines()[2])
         bug = bz.getbug(bugid)
-        print "\nCreated bugid: %s" % bugid
+        print("\nCreated bugid: %s" % bugid)
 
         self.assertEquals(bug.summary, summary)
         self.assertEquals(bug.bug_file_loc, url)
@@ -151,20 +169,29 @@ class RHPartnerTest(BaseTest):
         self.assertEquals(bug.depends_on, _split_int(dependson))
         self.assertTrue(all([e in bug.cc for e in cc.split(",")]))
         self.assertEquals(bug.longdescs[0]["text"], comment)
+        self.assertEquals(bug.sub_components, {"lvm2": [sub_component]})
+        self.assertEquals(bug.alias, [alias])
 
         # Close the bug
-        tests.clicomm("bugzilla modify --close WONTFIX %s" % bugid,
-                      bz)
+
+        # RHBZ makes it difficult to provide consistent semantics for
+        # 'alias' update:
+        # https://bugzilla.redhat.com/show_bug.cgi?id=1173114
+        # alias += "-closed"
+        tests.clicomm("bugzilla modify "
+            "--close WONTFIX %s " %
+            bugid, bz)
         bug.refresh()
         self.assertEquals(bug.status, "CLOSED")
         self.assertEquals(bug.resolution, "WONTFIX")
+        self.assertEquals(bug.alias, [alias])
 
 
     def test5ModifyStatus(self):
         """
         Modify status and comment fields for an existing bug
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         bugid = "663674"
         cmd = "bugzilla modify %s " % bugid
 
@@ -233,7 +260,7 @@ class RHPartnerTest(BaseTest):
         """
         Modify cc, assignee, qa_contact for existing bug
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         bugid = "663674"
         cmd = "bugzilla modify %s " % bugid
 
@@ -272,7 +299,7 @@ class RHPartnerTest(BaseTest):
 
         bug.refresh()
         self.assertEquals(bug.cc, [])
-        self.assertEquals(bug.assigned_to, "wwoods@redhat.com")
+        self.assertEquals(bug.assigned_to, "crobinso@redhat.com")
         self.assertEquals(bug.qa_contact, "extras-qa@fedoraproject.org")
 
 
@@ -280,7 +307,7 @@ class RHPartnerTest(BaseTest):
         """
         Modify flags and fixed_in for 2 bugs
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         bugid1 = "461686"
         bugid2 = "461687"
         cmd = "bugzilla modify %s %s " % (bugid1, bugid2)
@@ -356,7 +383,7 @@ class RHPartnerTest(BaseTest):
     def test7ModifyMisc(self):
         bugid = "461686"
         cmd = "bugzilla modify %s " % bugid
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         bug = bz.getbug(bugid)
 
         # modify --dependson
@@ -389,7 +416,7 @@ class RHPartnerTest(BaseTest):
 
         # modify --target_release
         # modify --target_milestone
-        targetbugid = 831888
+        targetbugid = 492463
         targetbug = bz.getbug(targetbugid)
         targetcmd = "bugzilla modify %s " % targetbugid
         tests.clicomm(targetcmd +
@@ -417,10 +444,10 @@ class RHPartnerTest(BaseTest):
         # modify --os
         # modify --platform
         # modify --version
-        tests.clicomm(cmd + "--version 18 --os Windows --arch ppc "
+        tests.clicomm(cmd + "--version rawhide --os Windows --arch ppc "
                             "--url http://example.com", bz)
         bug.refresh()
-        self.assertEquals(bug.version, "18")
+        self.assertEquals(bug.version, "rawhide")
         self.assertEquals(bug.op_sys, "Windows")
         self.assertEquals(bug.platform, "ppc")
         self.assertEquals(bug.url, "http://example.com")
@@ -431,6 +458,14 @@ class RHPartnerTest(BaseTest):
         self.assertEquals(bug.op_sys, "Linux")
         self.assertEquals(bug.platform, "s390")
         self.assertEquals(bug.url, "http://example.com/fribby")
+
+        # modify --field
+        tests.clicomm(cmd + "--field cf_fixed_in=foo-bar-1.2.3 \
+                      --field=cf_release_notes=baz", bz)
+
+        bug.refresh()
+        self.assertEquals(bug.fixed_in, "foo-bar-1.2.3")
+        self.assertEquals(bug.cf_release_notes, "baz")
 
 
     def test8Attachments(self):
@@ -450,7 +485,7 @@ class RHPartnerTest(BaseTest):
         """
         Get and set attachments for a bug
         """
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         getallbugid = "663674"
         setbugid = "461686"
         cmd = "bugzilla attach "
@@ -507,8 +542,8 @@ class RHPartnerTest(BaseTest):
 
         self.assertEquals(len(out), 3)
         self.assertEquals(fname, "bz-attach-get1.txt")
-        self.assertEquals(file(fname).read(),
-                          file(testfile).read())
+        self.assertEquals(open(fname).read(),
+                          open(testfile).read())
         os.unlink(fname)
 
         # Get all attachments
@@ -526,7 +561,7 @@ class RHPartnerTest(BaseTest):
 
 
     def test9Whiteboards(self):
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         bug_id = "663674"
         cmd = "bugzilla modify %s " % bug_id
         bug = bz.getbug(bug_id)
@@ -595,16 +630,27 @@ class RHPartnerTest(BaseTest):
                             "--user foobar@example.com "
                             "--password foobar login" % self.url, None,
                             expectfail=True)
-        self.assertTrue("Logging in... failed." in ret)
+        self.assertTrue("Login failed: " in ret)
+
+
+    def test10LoginState(self):
+        bz = self.bzclass(url=self.url, cookiefile=None, tokenfile=None)
+        self.assertFalse(bz.logged_in,
+            "Login state check failed for logged out user.")
+
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
+        self.assertTrue(bz.logged_in,
+            "Login state check failed for logged in user.")
 
 
     def test11UserUpdate(self):
         # This won't work if run by the same user we are using
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         email = "anaconda-maint-list@redhat.com"
         group = "fedora_contrib"
 
-        if not self._check_have_admin(bz, sys._getframe().f_code.co_name):
+        fn = sys._getframe().f_code.co_name  # pylint: disable=protected-access
+        if not self._check_have_admin(bz, fn):
             return
 
         user = bz.getuser(email)
@@ -635,7 +681,7 @@ class RHPartnerTest(BaseTest):
 
 
     def test11ComponentEditing(self):
-        bz = self.bzclass(url=self.url, cookiefile=cf)
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
         component = ("python-bugzilla-testcomponent-%s" %
                      str(random.randint(1, 1024 * 1024 * 1024)))
         basedata = {
@@ -643,12 +689,14 @@ class RHPartnerTest(BaseTest):
             "component": component,
         }
 
-        if not self._check_have_admin(bz, sys._getframe().f_code.co_name):
+        fn = sys._getframe().f_code.co_name  # pylint: disable=protected-access
+        if not self._check_have_admin(bz, fn):
             return
 
 
         def compare(data, newid):
-            products = bz._proxy.Product.get({"names": [basedata["product"]]})
+            proxy = bz._proxy  # pylint: disable=protected-access
+            products = proxy.Product.get({"names": [basedata["product"]]})
             compdata = None
             for c in products["products"][0]["components"]:
                 if int(c["id"]) == int(newid):
@@ -688,18 +736,72 @@ class RHPartnerTest(BaseTest):
         compare(data, newid)
 
     def test12SetCookie(self):
-        bz = self.bzclass(url=self.url, cookiefile=cf)
-        if not self._check_rh_privs(bz, sys._getframe().f_code.co_name):
+        bz = self.bzclass("partner-bugzilla.redhat.com",
+            cookiefile=cf, tokenfile=None)
+
+        fn = sys._getframe().f_code.co_name  # pylint: disable=protected-access
+        if not self._check_rh_privs(bz, "cookie", fn):
             return
 
         try:
             bz.cookiefile = None
             raise AssertionError("Setting cookiefile for active connection "
                                  "should fail.")
-        except RuntimeError, e:
+        except RuntimeError:
+            e = sys.exc_info()[1]
             self.assertTrue("disconnect()" in str(e))
 
         bz.disconnect()
         bz.cookiefile = None
         bz.connect()
-        self.assertFalse(bool(self._check_rh_privs(bz, "", True)))
+        self.assertFalse(bool(self._check_rh_privs(
+            bz, "", "cookie", quiet=True)))
+
+    def test13SubComponents(self):
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
+        # Long closed RHEL5 lvm2 bug. This component has sub_components
+        bug = bz.getbug("185526")
+        self.assertEquals(bug.component, "lvm2")
+
+        bz.update_bugs(bug.id, bz.build_update(
+            component="lvm2", sub_component="Command-line tools (RHEL5)"))
+        bug.refresh()
+        self.assertEqual(bug.sub_components,
+            {"lvm2": ["Command-line tools (RHEL5)"]})
+
+        bz.update_bugs(bug.id, bz.build_update(sub_component={}))
+        bug.refresh()
+        self.assertEqual(bug.sub_components, {})
+
+    def _test14ExternalTrackersQuery(self, bz, ext_type_desc, ext_bug_id):
+        boolean_query = bz.build_external_tracker_boolean_query(
+            ext_type_desc, ext_bug_id)
+        query = bz.build_query(
+            boolean_query=boolean_query, include_fields=['id'])
+        return [bug.bug_id for bug in bz.query(query)]
+
+    def test14ExternalTrackersQuery(self):
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
+        ext_type_desc = "FreeDesktop.org"
+        ext_bug_id = 64714
+
+        # Closed RH Bugzilla bug with external tracker
+        bugid = 973374
+        assert bugid in \
+            self._test14ExternalTrackersQuery(bz, ext_type_desc, ext_bug_id)
+
+    def test14ExternalTrackersAddRemove(self):
+        bz = self.bzclass(url=self.url, cookiefile=cf, tokenfile=tf)
+        ext_type_desc = "Mozilla Foundation"
+        ext_bug_id = 380489
+        bugid = 461686
+
+        # test adding tracker
+        bz.add_external_tracker(bugid, ext_type_desc, ext_bug_id)
+        assert bugid in \
+            self._test14ExternalTrackersQuery(bz, ext_type_desc, ext_bug_id)
+
+        # test removing tracker
+        bz.remove_external_tracker(bugid, ext_type_desc, ext_bug_id)
+        assert bugid not in \
+            self._test14ExternalTrackersQuery(bz, ext_type_desc, ext_bug_id)

@@ -1,4 +1,6 @@
-#!/usr/bin/python
+#!/usr/bin/env python
+
+from __future__ import print_function
 
 import glob
 import os
@@ -9,9 +11,9 @@ from distutils.core import setup, Command
 
 
 def get_version():
-    f = open("bugzilla/__init__.py")
+    f = open("bugzilla/apiversion.py")
     for line in f:
-        if line.startswith('__version__'):
+        if line.startswith('version = '):
             return eval(line.split('=')[-1])
 
 
@@ -47,7 +49,8 @@ class TestCommand(Command):
             usecov = False
 
         if usecov:
-            cov = coverage.coverage(omit=["/*/tests/*", "/usr/*"])
+            cov = coverage.coverage(omit=[
+                "/*/tests/*", "/usr/*", "*dev-env*", "*.tox/*"])
             cov.erase()
             cov.start()
 
@@ -70,7 +73,7 @@ class TestCommand(Command):
             try:
                 unittest.installHandler()
             except:
-                print "installHandler hack failed"
+                print("installHandler hack failed")
 
         tests = unittest.TestLoader().loadTestsFromNames(testfiles)
         if self.only:
@@ -82,14 +85,14 @@ class TestCommand(Command):
                             newtests.append(testcase)
 
             if not newtests:
-                print "--only didn't find any tests"
+                print("--only didn't find any tests")
                 sys.exit(1)
 
             tests = unittest.TestSuite(newtests)
-            print "Running only:"
+            print("Running only:")
             for test in newtests:
-                print "%s" % test
-            print
+                print("%s" % test)
+            print()
 
 
         t = unittest.TextTestRunner(verbosity=1)
@@ -115,47 +118,29 @@ class PylintCommand(Command):
     def finalize_options(self):
         pass
 
+    def _run(self):
+        files = ["bugzilla/", "bin-bugzilla", "tests/*.py"]
+        output_format = sys.stdout.isatty() and "colorized" or "text"
+
+        cmd = "pylint "
+        cmd += "--output-format=%s " % output_format
+        cmd += " ".join(files)
+        os.system(cmd + " --rcfile tests/pylint.cfg")
+
+        print("running pep8")
+        cmd = "pep8 "
+        cmd += " ".join(files)
+        os.system(cmd + " --config tests/pep8.cfg")
+
     def run(self):
-        os.system("pylint "
-            "--reports=n "
-            "--output-format=colorized "
-            "--dummy-variables-rgx=\"dummy|ignore*|.*ignore\" "
-            # Lines in modules, function size, ...
-            "--disable Design "
-            # Line length, spacing, ...
-            "--disable Format "
-            # Duplicate code
-            "--disable Similarities "
-            # Use of * or **
-            "--disable W0142 "
-            # Name doesn't match some style regex
-            "--disable C0103 "
-            # C0111: No docstring
-            "--disable C0111 "
-            # W0603: Using the global statement
-            "--disable W0603 "
-            # W0703: Catching too general exception:
-            "--disable W0703 "
-            # I0012: Warn about pylint messages disabled in comments
-            "--disable I0011 "
-            # R0201: Method could be a function
-            "--disable R0201 "
-
-            # Would be nice to disable these 2 but it just
-            # ain't work reorganizing the code to not trigger them
-            # W0223: Abstract method not overwritten in
-            "--disable W0223 "
-            # W0212: Access to a protected member of a client class
-            "--disable W0212 "
-
-            "bugzilla/ bin/bugzilla tests/*.py ")
-
-        os.system("pep8 --format=pylint "
-            "bugzilla/ bin/bugzilla tests/ "
-            # E303: Too many blank lines
-            # E125: Continuation indent isn't different from next block
-            # E128: Not indented for visual style
-            "--ignore E303,E125,E128")
+        os.link("bin/bugzilla", "bin-bugzilla")
+        try:
+            self._run()
+        finally:
+            try:
+                os.unlink("bin-bugzilla")
+            except:
+                pass
 
 
 class RPMCommand(Command):
@@ -171,9 +156,33 @@ class RPMCommand(Command):
         """
         Run sdist, then 'rpmbuild' the tar.gz
         """
-        self.run_command('sdist')
-        os.system('rpmbuild -ta --clean dist/python-bugzilla-%s.tar.gz' %
-                  get_version())
+        os.system("cp python-bugzilla.spec /tmp")
+        try:
+            os.system("rm -rf python-bugzilla-%s" % get_version())
+            self.run_command('sdist')
+            os.system('rpmbuild -ta --clean dist/python-bugzilla-%s.tar.gz' %
+                      get_version())
+        finally:
+            os.system("mv /tmp/python-bugzilla.spec .")
+
+
+requirements = {}
+
+try:
+    from pip.req import parse_requirements
+
+    requirement_files = {
+        'install_requires': 'requirements.txt',
+        'tests_require': 'test-requirements.txt',
+    }
+
+    for name, fname in requirement_files.items():
+        requirements[name] = [
+            str(ir.req) for ir in parse_requirements(fname)
+        ]
+except ImportError:
+    # ignore as this is not useful without pip anyway
+    pass
 
 
 setup(name='python-bugzilla',
@@ -191,5 +200,6 @@ setup(name='python-bugzilla',
         "pylint" : PylintCommand,
         "rpm" : RPMCommand,
         "test" : TestCommand,
-      }
+      },
+      **requirements
 )

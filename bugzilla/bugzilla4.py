@@ -8,20 +8,12 @@
 # option) any later version.  See http://www.gnu.org/copyleft/gpl.html for
 # the full text of the license.
 
-from bugzilla.bugzilla3 import Bugzilla36
+from .bugzilla3 import Bugzilla36
 
 
 class Bugzilla4(Bugzilla36):
-    '''Concrete implementation of the Bugzilla protocol. This one uses the
-    methods provided by standard Bugzilla 4.0.x releases.'''
-
-    version = '0.1'
-
     bz_ver_major = 4
     bz_ver_minor = 0
-
-    def __init__(self, **kwargs):
-        Bugzilla36.__init__(self, **kwargs)
 
 
     #################
@@ -32,20 +24,17 @@ class Bugzilla4(Bugzilla36):
         query = Bugzilla36.build_query(self, **kwargs)
 
         # 'include_fields' only available for Bugzilla4+
-        include_fields = kwargs.get('include_fields', None)
-        if not include_fields is None:
-            query["include_fields"] = include_fields
-
-            # Translate old style fields
-            for newname, oldname in self.field_aliases:
-                if oldname in include_fields:
-                    include_fields.remove(oldname)
-                    if newname not in include_fields:
-                        include_fields.append(newname)
-
-            # We always need the id
+        include_fields = self._convert_include_field_list(
+            kwargs.pop('include_fields', None))
+        if include_fields:
             if 'id' not in include_fields:
                 include_fields.append('id')
+            query["include_fields"] = include_fields
+
+        exclude_fields = self._convert_include_field_list(
+            kwargs.pop('exclude_fields', None))
+        if exclude_fields:
+            query["exclude_fields"] = exclude_fields
 
         return query
 

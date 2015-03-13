@@ -9,26 +9,31 @@
 # option) any later version.  See http://www.gnu.org/copyleft/gpl.html for
 # the full text of the license.
 
-__version__ = "0.9.0suse3"
-version = __version__
+from logging import getLogger
+import sys
 
-import logging
-import xmlrpclib
+if hasattr(sys.version_info, "major") and sys.version_info.major >= 3:
+    # pylint: disable=F0401
+    from xmlrpc.client import Fault, ServerProxy
+else:
+    from xmlrpclib import Fault, ServerProxy
 
-log = logging.getLogger("bugzilla")
+from .apiversion import version, __version__
+from .base import BugzillaBase as _BugzillaBase
+from .base import BugzillaError
+from .base import RequestsTransport as _RequestsTransport
+from .bugzilla3 import Bugzilla3, Bugzilla32, Bugzilla34, Bugzilla36
+from .bugzilla4 import Bugzilla4, Bugzilla42, Bugzilla44
+from .nvlbugzilla import NovellBugzilla
+from .rhbugzilla import RHBugzilla, RHBugzilla3, RHBugzilla4
+
+log = getLogger(__name__)
 
 
-from bugzilla.base import BugzillaError
-from bugzilla.bugzilla3 import Bugzilla3, Bugzilla32, Bugzilla34, Bugzilla36
-from bugzilla.bugzilla4 import Bugzilla4, Bugzilla42, Bugzilla44
-from bugzilla.nvlbugzilla import NovellBugzilla
-from bugzilla.rhbugzilla import RHBugzilla, RHBugzilla3, RHBugzilla4
-
-
-def getBugzillaClassForURL(url):
+def _getBugzillaClassForURL(url, sslverify):
     url = Bugzilla3.fix_url(url)
-    log.debug("Detecting subclass for %s" % url)
-    s = xmlrpclib.ServerProxy(url)
+    log.debug("Detecting subclass for %s", url)
+    s = ServerProxy(url, _RequestsTransport(url, sslverify=sslverify))
     rhbz = False
     bzversion = ''
     c = None
@@ -36,8 +41,8 @@ def getBugzillaClassForURL(url):
     if "bugzilla.redhat.com" in url:
         log.info("Using RHBugzilla for URL containing bugzilla.redhat.com")
         return RHBugzilla
-    if ".novell.com" in url:
-        logging.info("Using NovellBugzilla for URL containing novell.com")
+    if "bugzilla.novell.com" in url:
+        log.info("Using NovellBugzilla for URL containing novell.com")
         return NovellBugzilla
 
     # Check for a Red Hat extension
@@ -46,18 +51,18 @@ def getBugzillaClassForURL(url):
         extensions = s.Bugzilla.extensions()
         if extensions.get('extensions', {}).get('RedHat', False):
             rhbz = True
-    except xmlrpclib.Fault:
+    except Fault:
         pass
-    log.debug("rhbz=%s" % str(rhbz))
+    log.debug("rhbz=%s", str(rhbz))
 
     # Try to get the bugzilla version string
     try:
         log.debug("Checking return value of Bugzilla.version()")
         r = s.Bugzilla.version()
         bzversion = r['version']
-    except xmlrpclib.Fault:
+    except Fault:
         pass
-    log.debug("bzversion='%s'" % str(bzversion))
+    log.debug("bzversion='%s'", str(bzversion))
 
     # note preference order: RHBugzilla* wins if available
     if rhbz:
@@ -68,7 +73,7 @@ def getBugzillaClassForURL(url):
         elif bzversion.startswith("4.2"):
             c = Bugzilla42
         else:
-            log.debug("No explicit match for %s, using latest bz4" % bzversion)
+            log.debug("No explicit match for %s, using latest bz4", bzversion)
             c = Bugzilla44
     else:
         if bzversion.startswith('3.6'):
@@ -84,29 +89,24 @@ def getBugzillaClassForURL(url):
     return c
 
 
-class Bugzilla(object):
+class Bugzilla(_BugzillaBase):
     '''
     Magical Bugzilla class that figures out which Bugzilla implementation
-    to use and uses that. Requires 'url' parameter so we can check available
-    XMLRPC methods to determine the Bugzilla version.
+    to use and uses that.
     '''
-    def __init__(self, **kwargs):
-        log.info("Bugzilla v%s initializing" % __version__)
-        if 'url' not in kwargs:
+    def _init_class_from_url(self, url, sslverify):
+        if url is None:
             raise TypeError("You must pass a valid bugzilla URL")
 
-        # pylint: disable=W0233
-        # Use of __init__ of non parent class
-
-        c = getBugzillaClassForURL(kwargs['url'])
+        c = _getBugzillaClassForURL(url, sslverify)
         if not c:
             raise ValueError("Couldn't determine Bugzilla version for %s" %
-                             kwargs['url'])
+                             url)
 
-        if c:
-            self.__class__ = c
-            c.__init__(self, **kwargs)
-            log.info("Chose subclass %s v%s" % (c.__name__, c.version))
+        self.__class__ = c
+        log.info("Chose subclass %s v%s", c.__name__, c.version)
+        return True
+
 
 # This is the list of possible Bugzilla instances an app can use,
 # bin/bugzilla uses it for the --bztype field

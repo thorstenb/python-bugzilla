@@ -1,12 +1,17 @@
 
+from __future__ import print_function
+
 import atexit
-import commands
 import difflib
 import imp
 import os
 import shlex
 import sys
-import StringIO
+
+if hasattr(sys.version_info, "major") and sys.version_info.major >= 3:
+    from io import StringIO
+else:
+    from StringIO import StringIO
 
 
 _cleanup = []
@@ -41,8 +46,8 @@ def diff(orig, new):
 def difffile(expect, filename):
     expect += '\n'
     if not os.path.exists(filename) or os.getenv("__BUGZILLA_UNITTEST_REGEN"):
-        file(filename, "w").write(expect)
-    ret = diff(file(filename).read(), expect)
+        open(filename, "w").write(expect)
+    ret = diff(open(filename).read(), expect)
     if ret:
         raise AssertionError("Output was different:\n%s" % ret)
 
@@ -61,7 +66,7 @@ def clicomm(argv, bzinstance, returnmain=False, printcliout=False,
     oldargv = sys.argv
     try:
         if not printcliout:
-            out = StringIO.StringIO()
+            out = StringIO()
             sys.stdout = out
             sys.stderr = out
             if stdin:
@@ -71,11 +76,12 @@ def clicomm(argv, bzinstance, returnmain=False, printcliout=False,
         ret = 0
         mainout = None
         try:
-            print " ".join(argv)
-            print
+            print(" ".join(argv))
+            print()
 
             mainout = bugzillascript.main(bzinstance)
-        except SystemExit, sys_e:
+        except SystemExit:
+            sys_e = sys.exc_info()[1]
             ret = sys_e.code
 
         outt = ""
