@@ -9,11 +9,20 @@
 # option) any later version.  See http://www.gnu.org/copyleft/gpl.html for
 # the full text of the license.
 
-from bugzilla import Bugzilla44, log
+import sys
+from logging import getLogger
+from .bugzilla4 import Bugzilla44 as _parent
 
-import urlparse
+if hasattr(sys.version_info, "major") and sys.version_info.major >= 3:
+    # pylint: disable=F0401,E0611
+    from urllib.parse import urlparse
+else:
+    from urlparse import urlparse
 
-class NovellBugzilla(Bugzilla44):
+log = getLogger(__name__)
+
+
+class NovellBugzilla(_parent):
     '''
     bugzilla.novell.com is a standard bugzilla 4.4 with some extensions.
     By default, it uses a proprietary AccessManager login system, but by using a special
